@@ -1,7 +1,11 @@
 use clap::{arg, Parser};
+use std::error::Error;
+use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader};
-use walkdir::WalkDir;
+use std::io::{self, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process;
+use walkdir::{DirEntry, WalkDir};
 use xz2::write::XzEncoder;
 
 #[derive(Parser, Debug)]
@@ -19,8 +23,159 @@ struct Args {
     #[arg(short, long)]
     output_file: String,
 }
-//TODO: Remove generic argument
-fn main() -> io::Result<()> {
+// Custom Error type
+#[derive(Debug)]
+enum CompressionError {
+    IoError(io::Error),
+    UnsupportedFileType,
+    WalkDirError(walkdir::Error),
+}
+
+// Define implementation
+impl From<io::Error> for CompressionError {
+    fn from(err: io::Error) -> Self {
+        CompressionError::IoError(err)
+    }
+}
+
+impl From<walkdir::Error> for CompressionError {
+    fn from(err: walkdir::Error) -> Self {
+        CompressionError::WalkDirError(err)
+    }
+}
+
+impl fmt::Display for CompressionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CompressionError::IoError(err) => write!(f, "I/O Error: {}", err),
+            CompressionError::UnsupportedFileType => write!(f, "Unsupported File Type!"),
+            CompressionError::WalkDirError(err) => write!(f, "Failed to find directory: {}", err),
+        }
+    }
+}
+
+/// Define compress worker
+fn compress_worker<P2: AsRef<Path>>(
+    source_path: DirEntry,
+    out_file: P2,
+) -> Result<u64, CompressionError> {
+    let input_dir = File::open(source_path.path());
+    let mut in_file = match input_dir {
+        Ok(in_file) => in_file,
+        Err(err) => {
+            eprintln!("Failed due to: {}", err);
+            return Err(CompressionError::IoError(err));
+        }
+    };
+    let output_file = File::create(&out_file);
+    let out = match output_file {
+        Ok(out) => out,
+        Err(err) => {
+            eprintln!("Failed to create output file: {}", err);
+            return Err(CompressionError::IoError(err));
+        }
+    };
+
+    let mut encoder = XzEncoder::new(out, 9);
+    let meta = format!(
+        "{}:{}\n",
+        source_path.path().file_name().unwrap().to_str().unwrap(),
+        source_path.metadata()?.len()
+    );
+    let _ = encoder.write_all(meta.as_bytes());
+    io::copy(&mut in_file, &mut encoder)?;
+    encoder.try_finish()?;
+    Ok(encoder.total_out())
+}
+
+//TODO: Move this to another file then write the decompression logic.
+/// Define compress action
+/// Compress the given files, then return
+/// the list of included files for compression & output file size.
+/// * `dir_path`: Directory with cbz files.
+/// * `output_file`: Name of output file.
+fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
+    dir_path: P1,
+    output_file: P2,
+) -> Result<(Vec<PathBuf>, u64), CompressionError> {
+    let mut compressed_list: Vec<PathBuf> = Vec::new();
+    let compressed_size: u64;
+    let out_file = match File::create(output_file) {
+        Ok(out) => out,
+        Err(err) => {
+            eprintln!("Fail!");
+            return Err(CompressionError::IoError(err));
+        }
+    };
+
+    let mut encoder = XzEncoder::new(out_file, 9);
+    for entry in WalkDir::new(dir_path).into_iter().filter_map(|e| e.ok()) {
+        /*
+        * NOTE: This only compresses individual files not grabbing everything then compressing.
+        if val.file_type().is_file() && val.path().extension().map_or(false, |ext| ext == "rs") {
+            let file = val.path().to_path_buf();
+            compressed_size = compress_worker(val, &output_file)?;
+            compressed_list.push(file);
+        }
+        */
+
+        if let Some(ext) = entry.path().extension() {
+            if ext == "cbz" {
+                let file = File::open(entry.path());
+                compressed_list.push(entry.path().to_path_buf());
+                let curr_file = match file {
+                    Ok(curr_file) => curr_file,
+                    Err(err) => {
+                        eprintln!("Failed to create file: {}", err);
+                        return Err(CompressionError::IoError(err));
+                    }
+                };
+                let metadata = format!(
+                    "{}:{}\n",
+                    entry.path().file_name().unwrap().to_str().unwrap(),
+                    entry.metadata()?.len()
+                );
+                encoder.write_all(metadata.as_bytes())?;
+                io::copy(&mut io::BufReader::new(curr_file), &mut encoder)?;
+            }
+        }
+    }
+    encoder.try_finish()?;
+    compressed_size = encoder.total_out();
+    Ok((compressed_list, compressed_size))
+}
+
+fn main() {
+    let args = Args::parse();
+    let output_file = args.output_file.clone();
+    match compress_action(args.input_dir, args.output_file) {
+        Ok(compressed) => {
+            println!("Compression done for: ");
+            for file in compressed.0 {
+                println!("{}", file.display());
+            }
+            println!("New compressed file name: {}", output_file);
+            println!("New file size: {}", compressed.1);
+        }
+        Err(CompressionError::IoError(err)) => {
+            eprintln!("I/O Error: {}", err);
+            process::exit(1);
+        }
+
+        Err(CompressionError::UnsupportedFileType) => {
+            eprintln!("Unsupported File Type only CBZ files are supported");
+            process::exit(1);
+        }
+
+        Err(CompressionError::WalkDirError(err)) => {
+            eprintln!("Failed to find files in directory: {}", err);
+            process::exit(1);
+        }
+    }
+}
+
+// This function works fine but hangs since it doesnt exit
+fn main_working() -> io::Result<()> {
     let args = Args::parse();
     let out_file_path = args.output_file;
     let output_file = File::create(out_file_path);
@@ -33,7 +188,6 @@ fn main() -> io::Result<()> {
     };
 
     let mut xz_encoder = XzEncoder::new(out, 9);
-    //compressor(xz_encoder, out);
 
     for entry in WalkDir::new(args.input_dir)
         .into_iter()
@@ -41,8 +195,6 @@ fn main() -> io::Result<()> {
     {
         if let Some(extension) = entry.path().extension() {
             if extension == "rs" {
-                //println!("File name: {:?}", entry.path().file_name())
-                //NOTE: Research on Result<(), Error>
                 let file_buff = File::open(entry.path())?;
                 let file_reader = BufReader::new(file_buff);
                 let _ = match io::copy(&mut BufReader::new(file_reader), &mut xz_encoder) {
@@ -59,63 +211,8 @@ fn main() -> io::Result<()> {
             }
         }
     }
-    /*
-    Command::new("CBZ Compressor")
-        .version("1.0")
-        .author("Your Name")
-        .about("Compresses CBZ files into an LZMA-compressed archive")
-        .arg(
-            Arg::new("input-dir")
-                .short('i')
-                .long("input-dir")
-                .value_name("DIRECTORY")
-                .help("Sets the input directory containing CBZ files")
-                .required(true),
-        )
-        .arg(
-            Arg::new("output-file")
-                .short('o')
-                .long("output-file")
-                .value_name("FILE")
-                .help("Sets the output .xz file")
-                .required(true),
-        )
-        .get_matches();
-    */
-    //TODO: look for a guide that can help with this
-    /*
-    let values = Args::parse();
-    println!("Input Dir: {}", values[0].name);
-    println!("Output File: {}", values[1].name);
-    */
+    xz_encoder.finish()?;
 
-    /*
-        let input_dir = Args::parse("input-dir").unwrap();
-        let output_file = matches.value_of("output-file").unwrap();
-    */
-
-    // Create the output .xz file
-    /*
-    let output_file = File::create(output_file)?;
-    let mut encoder = XzEncoder::new(output_file, 9);
-
-    // Traverse the directory to find .cbz files
-    for entry in WalkDir::new(input_dir).into_iter().filter_map(|e| e.ok()) {
-        if let Some(extension) = entry.path().extension() {
-            if extension == "cbz" {
-                let mut file = File::open(entry.path())?;
-
-                // Copy the content of the .cbz file to the encoder
-                io::copy(&mut file, &mut encoder)?;
-            }
-        }
-    }
-
-    // Finish encoding and flush the output
-    encoder.finish()?;
-    */
-
-    //xz_encoder.finish()?;
     println!("Compression complete. Output: ");
     Ok(())
 }
