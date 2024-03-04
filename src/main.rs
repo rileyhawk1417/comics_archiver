@@ -1,4 +1,6 @@
 use clap::{arg, Parser};
+use comics_archiver::cbz_actions::extract_dir_and_files_from_cbz;
+use liblzma::write::XzEncoder;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
@@ -6,7 +8,6 @@ use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use walkdir::{DirEntry, WalkDir};
-use xz2::write::XzEncoder;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -94,7 +95,7 @@ fn compress_worker<P2: AsRef<Path>>(
 /// the list of included files for compression & output file size.
 /// * `dir_path`: Directory with cbz files.
 /// * `output_file`: Name of output file.
-fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
+async fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
     dir_path: P1,
     output_file: P2,
 ) -> Result<(Vec<PathBuf>, u64), CompressionError> {
@@ -108,8 +109,17 @@ fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
         }
     };
 
+    let total_files = WalkDir::new(dir_path.as_ref())
+        .follow_links(true)
+        .into_iter()
+        .count();
+    let mut progress = 0;
+
     let mut encoder = XzEncoder::new(out_file, 9);
+    let percent_completion = (progress as f32 / total_files as f32) * 100.0;
+    let mut compressed_list = Vec::new();
     for entry in WalkDir::new(dir_path).into_iter().filter_map(|e| e.ok()) {
+        // BUG: Without error handling it does pass values, but when error handling it fails
         if let Some(ext) = entry.path().extension() {
             if ext == "cbz" {
                 let cbz_entries = match extract_dir_and_files_from_cbz(entry.path()).await {
@@ -119,6 +129,25 @@ fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
                         return Err(CompressionError::IoError(err));
                     }
                 };
+
+                for (_, file_path) in cbz_entries {
+                    //NOTE: Eventually run through this loop, optimize all the images then compress them
+                    // let mut compressed_photos = compress_photos();
+                    // compressed_list.push(compressed_photos, file_path);
+                    println!(": {}", file_path.to_str().unwrap());
+                }
+            }
+        }
+        // Using it directly with no error handling works fine
+        //let cbz_entries = extract_dir_and_files_from_cbz(entry.path()).await?;
+
+        // Print cbz_entries on screen for testing
+        /*
+                for (file_name, file_path) in cbz_entries {
+                    println!("{:?}: {}", file_name, file_path.to_str().unwrap());
+                }
+        */
+        //TODO: fetch entries and print
         /*
         * NOTE: This only compresses individual files not grabbing everything then compressing.
         if val.file_type().is_file() && val.path().extension().map_or(false, |ext| ext == "rs") {
@@ -128,36 +157,52 @@ fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
         }
         */
 
-        if let Some(ext) = entry.path().extension() {
-            if ext == "cbz" {
-                let file = File::open(entry.path());
-                compressed_list.push(entry.path().to_path_buf());
-                let curr_file = match file {
-                    Ok(curr_file) => curr_file,
-                    Err(err) => {
-                        eprintln!("Failed to create file: {}", err);
-                        return Err(CompressionError::IoError(err));
+        /*
+                progress += 1;
+                if let Some(ext) = entry.path().extension() {
+                    if ext == "cbz" {
+                        let file = File::open(entry.path());
+                        compressed_list.push(entry.path().to_path_buf());
+                        let curr_file = match file {
+                            Ok(curr_file) => curr_file,
+                            Err(err) => {
+                                eprintln!("Failed to create file: {}", err);
+                                return Err(CompressionError::IoError(err));
+                            }
+                        };
+                        let metadata = format!(
+                            "{}:{}\n",
+                            entry.path().file_name().unwrap().to_str().unwrap(),
+                            entry.metadata()?.len()
+                        );
+                        encoder.write_all(metadata.as_bytes())?;
+                        println!("{}", entry.path().file_name().unwrap().to_str().unwrap());
+                        io::copy(&mut io::BufReader::new(curr_file), &mut encoder)?;
                     }
-                };
-                let metadata = format!(
-                    "{}:{}\n",
-                    entry.path().file_name().unwrap().to_str().unwrap(),
-                    entry.metadata()?.len()
-                );
-                encoder.write_all(metadata.as_bytes())?;
-                io::copy(&mut io::BufReader::new(curr_file), &mut encoder)?;
-            }
-        }
+
+                    print!("\r[");
+                    let percent_chars = (percent_completion / 2.0) as usize;
+                    for _ in 0..percent_chars {
+                        print!("=");
+                    }
+                    for _ in percent_chars..50 {
+                        print!(" ");
+                    }
+                    print!("] {:.2}% ", percent_completion);
+                    io::stdout().flush().unwrap();
+                }
+
+        */
     }
-    encoder.try_finish()?;
+    //encoder.try_finish()?;
     compressed_size = encoder.total_out();
     Ok((compressed_list, compressed_size))
 }
-
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
     let output_file = args.output_file.clone();
-    match compress_action(args.input_dir, args.output_file) {
+    match compress_action(args.input_dir, args.output_file).await {
         Ok(compressed) => {
             println!("Compression done for: ");
             for file in compressed.0 {
