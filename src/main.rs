@@ -110,6 +110,15 @@ fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
 
     let mut encoder = XzEncoder::new(out_file, 9);
     for entry in WalkDir::new(dir_path).into_iter().filter_map(|e| e.ok()) {
+        if let Some(ext) = entry.path().extension() {
+            if ext == "cbz" {
+                let cbz_entries = match extract_dir_and_files_from_cbz(entry.path()).await {
+                    Ok(f) => f,
+                    Err(err) => {
+                        eprintln!("Failed due to: {}", err);
+                        return Err(CompressionError::IoError(err));
+                    }
+                };
         /*
         * NOTE: This only compresses individual files not grabbing everything then compressing.
         if val.file_type().is_file() && val.path().extension().map_or(false, |ext| ext == "rs") {
