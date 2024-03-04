@@ -11,9 +11,14 @@ use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 /// * `cbz_file`: `.cbz file`
 pub async fn extract_dir_and_files_from_cbz(cbz_file: &str) -> io::Result<Vec<(Vec<u8>, PathBuf)>> {
     let mut entries = Vec::new();
-    let file = AsyncFile::open(cbz_file).await?;
-    let mut zip_archive_adapter = AsyncBufReaderAdapter(file);
-    let mut zip_file = ZipArchive::new(&mut zip_archive_adapter).unwrap();
+    let file = match AsyncFile::open(cbz_file.as_ref()).await {
+        Ok(f) => f,
+        Err(e) => return Err(e),
+    };
+    let file = file.into_std().await;
+    let file = io::BufReader::new(file);
+
+    let mut zip_file = ZipArchive::new(file)?;
 
     for idx in 0..zip_file.len() {
         let mut inner_file = zip_file.by_index(idx)?;
