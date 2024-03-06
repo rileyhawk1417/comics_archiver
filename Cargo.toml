@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1.77"
 clap = { version = "4.5.1", features = ["derive"] }
+humantime = "2.1.0"
 image = "0.24.9"
 indicatif = "0.17.8"
 liblzma = {version = "0.3", features = ["parallel", "tokio"]}

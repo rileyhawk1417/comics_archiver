@@ -1,19 +1,18 @@
 use clap::{arg, Parser};
 use comics_archiver::cbz_actions::{
-    compress_dir_and_files_to_cbz, compress_images_with_img, compress_images_with_lzma,
-    extract_dir_and_files_from_cbz,
+    compress_dir_and_files_to_cbz, compress_images_with_img, extract_dir_and_files_from_cbz,
 };
 use comics_archiver::err_impl::CompressionError;
-use indicatif::{HumanBytes, ProgressBar, ProgressState, ProgressStyle};
+use humantime::format_duration;
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use liblzma::write::XzEncoder;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use std::cmp::min;
-use std::error::Error;
-use std::fmt;
+use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::fs::File as AsyncFile;
 use tokio::io::{copy as Async_Copy, AsyncReadExt, AsyncWriteExt, BufWriter};
 use walkdir::{DirEntry, WalkDir};
@@ -68,14 +67,48 @@ fn compress_worker<P2: AsRef<Path>>(
     Ok(encoder.total_out())
 }
 
+fn cbz_file_count(file_dir: Arc<impl AsRef<Path> + Send + Sync>) -> u64 {
+    let mut file_count = 0;
+
+    for entry in WalkDir::new(file_dir.as_ref())
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if let Some(ext) = entry.path().extension() {
+            if ext == "cbz" {
+                file_count += 1;
+            }
+        }
+    }
+    file_count as u64
+}
+
+fn cbz_file_list(
+    file_list: Arc<impl AsRef<Path> + Send + Sync>,
+) -> Result<Vec<PathBuf>, CompressionError> {
+    let mut discovered_entries = Vec::new();
+
+    for entry in WalkDir::new(file_list.as_ref())
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if let Some(ext) = entry.path().extension() {
+            if ext == "cbz" {
+                discovered_entries.push(entry.path().to_owned());
+            }
+        }
+    }
+    Ok(discovered_entries)
+}
+
 //TODO: Move this to another file then write the decompression logic.
 /// Define compress action
 /// Compress the given files, then return
 /// the list of included files for compression & output file size.
 /// * `dir_path`: Directory with cbz files.
 /// * `output_file`: Name of output file.
-async fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
-    dir_path: P1,
+async fn compress_action<'a, P2: AsRef<Path>>(
+    dir_path: Arc<impl AsRef<Path> + Send + Sync + 'static>,
     output_file: P2,
 ) -> Result<(Vec<(String, Vec<u8>, PathBuf)>, u64), CompressionError> {
     let mut compressed_list: Vec<PathBuf> = Vec::new();
@@ -88,16 +121,15 @@ async fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
         }
     };
 
-    let total_files = WalkDir::new(dir_path.as_ref())
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .count();
-    let pb = ProgressBar::new(total_files as u64);
-    let mut progress = 0;
+    let dir_clone = &dir_path.clone();
+    let total_files = cbz_file_count(dir_path.clone());
+
+    let multi_pb = MultiProgress::new();
+    let pb = multi_pb.add(ProgressBar::new(total_files as u64));
+    //    let mut progress = 0;
 
     let mut encoder = XzEncoder::new(out_file.into_std().await, 9);
-    let percent_completion = (progress as f32 / total_files as f32) * 100.0;
+    //  let percent_completion = (progress as f32 / total_files as f32) * 100.0;
     let mut compressed_list = Vec::new();
     //NOTE: Parallelism idea?
     /*
@@ -128,7 +160,27 @@ async fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
         println!(": {}", file_path.to_str().unwrap());
     }
     */
-    let dir_clone = dir_path.as_ref();
+    println!("Begin the process...");
+    let raw_files = tokio::spawn(async {
+        let raw_file_list = cbz_file_list(dir_path).unwrap();
+        let mut extracted_files = Vec::new();
+        for filez in raw_file_list {
+            let data = match extract_dir_and_files_from_cbz(filez).await {
+                Ok(f) => f,
+                Err(err) => {
+                    eprintln!("Failed due to: {}", err);
+                    return Err(CompressionError::IoError(err));
+                }
+            };
+            //TODO: Figure out filter conditions.
+            if !extracted_files.contains(&data) {
+                extracted_files.push(data);
+            }
+        }
+        Ok(extracted_files)
+    });
+    /*
+    * NOTE: This block does work though
     for entry in WalkDir::new(&dir_path).into_iter().filter_map(|e| e.ok()) {
         if let Some(ext) = entry.path().extension() {
             if ext == "cbz" {
@@ -144,14 +196,15 @@ async fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
                 //NOTE: If it doesnt work out remove chunks * clones
                 //EDIT: This does help free up some performance, problem is its writing more than
                 //once?
-                //NOTE: Chunking was the right answer :)
+                //NOTE: Chunking was the right answer :) 4 allows it to at least repack all files
+                //nicely.
                 for file_data in cbz_entries.chunks(4) {
                     if let Some(s) = file_data.first() {
                         let compressed_img = match compress_images_with_img(s.1.clone()) {
                             Ok(img) => img,
                             Err(err) => {
                                 eprintln!("Error compressing image! : {}", err);
-                                return Err(CompressionError::IoError(err));
+                                return Err(err);
                             }
                         };
                         compressed_list.push((s.0.clone(), compressed_img, s.2.clone()));
@@ -159,92 +212,116 @@ async fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
                 }
             }
         }
-
-        for (file_name, _, file_path) in &compressed_list {
-            println!(
-                "file_name: {}, compressed_list: {}",
-                file_name,
-                file_path.to_str().unwrap()
-            );
+        */
+    /*
+    for (file_name, _, file_path) in &compressed_list {
+        println!(
+            "file_name: {}, compressed_list: {}",
+            file_name,
+            file_path.to_str().unwrap()
+        );
+    }
+    */
+    /*
+    let mut size: usize = 0;
+    if let Some(f) = compressed_list.first() {
+        size = f.1.len();
+    }
+    */
+    //BUG: Being called too many times without waiting for unpacking to finish.
+    let mut raw_data: Vec<Vec<(String, Vec<u8>, PathBuf)>> = raw_files.await.unwrap().unwrap();
+    let pb_imgs = multi_pb.insert_after(&pb, ProgressBar::new(raw_data.len() as u64));
+    let mutex_data = Arc::new(Mutex::new(raw_data.clone()));
+    pb_imgs.set_message("Compressing images...");
+    raw_data.par_iter_mut().for_each(|imgs| {
+        let mut raw_data = mutex_data.lock().unwrap();
+        for inner_items in imgs.iter_mut() {
+            let img_1 = inner_items.1.clone();
+            inner_items.1 = compress_images_with_img(img_1).expect("Failed to compress!");
+            pb_imgs.inc(1);
         }
-        let mut size: usize = 0;
-        if let Some(f) = compressed_list.first() {
-            size = f.1.len();
-        }
-        let data = match compress_dir_and_files_to_cbz(compressed_list.clone()) {
-            Ok(complete) => complete,
-            Err(err) => {
-                eprintln!("Error repacking files! : {}", err);
-                return Err(CompressionError::IoError(err));
-            }
-        };
+    });
+    pb_imgs.finish_with_message("Finished compressing images!");
 
-        let tmp_output_path = format!("{}/{}", dir_clone.to_str().unwrap(), "tmp");
-        tokio::fs::create_dir_all(&tmp_output_path).await?;
-
-        let tmp_file_path = format!("{}/{:?}", tmp_output_path, data.0);
-        /*
-                match optimized_file.write_all(&data.1).await {
-                    Ok(done) => done,
-                    Err(err) => {
-                        eprintln!("Failed to copy repacked file: {}", err);
-                    }
+    //Loop inside all cbz archives.
+    let final_compression: Vec<Result<(String, Vec<u8>), CompressionError>> = raw_data
+        .par_iter()
+        .map(
+            |files| match compress_dir_and_files_to_cbz(files.to_vec()) {
+                Ok(complete) => Ok(complete),
+                Err(err) => {
+                    return Err(CompressionError::IoError(err));
                 }
-        */
-        match tokio::fs::write(tmp_file_path, &data.1).await {
-            Ok(done) => done,
+            },
+        )
+        .collect();
 
-            Err(err) => {
-                eprintln!("Error writing cbz file! : {}", err);
-                return Err(CompressionError::IoError(err));
-            }
-        };
-        pb.inc(1);
-        /*
-                match tokio::io::copy(&mut Cursor::new(data.1), &mut optimized_file).await {
-                    Ok(_done) => {
-                        println!("Copying Done!");
-                    }
-                    Err(err) => {
-                        eprintln!("Failed to copy repacked file: {}", err);
-                    }
-                };
-        */
+    let tmp_output_path = format!(
+        "{}/{}",
+        dir_clone.as_ref().as_ref().to_str().unwrap(),
+        "tmp"
+    );
+    tokio::fs::create_dir_all(tmp_output_path.clone()).await?;
 
-        /*
-                //TODO: MAke this async
-                match encoder.write_all(&data[..]) {
-                    Ok(_done) => {
-                        println!("Writing to file...: ");
-                        encoder.try_finish()?;
-                    }
-                    Err(err) => {
-                        eprintln!("Error repacking files! : {}", err);
-                        return Err(CompressionError::IoError(err));
-                    }
-                };
-        */
+    for items in final_compression {
+        let _ = if let Ok(item) = items {
+            let tmp_file_path = format!("{}/{}", tmp_output_path, item.0);
+            match tokio::fs::write(tmp_file_path, item.1).await {
+                Ok(done) => done,
 
-        // Using it directly with no error handling works fine
-        //let cbz_entries = extract_dir_and_files_from_cbz(entry.path()).await?;
-
-        // Print cbz_entries on screen for testing
-        /*
-                for (file_name, file_path) in cbz_entries {
-                    println!("{:?}: {}", file_name, file_path.to_str().unwrap());
+                Err(err) => {
+                    eprintln!("Error writing cbz file! : {}", err);
+                    return Err(CompressionError::IoError(err));
                 }
-        */
-        //TODO: fetch entries and print
-        /*
-        * NOTE: This only compresses individual files not grabbing everything then compressing.
-        if val.file_type().is_file() && val.path().extension().map_or(false, |ext| ext == "rs") {
-            let file = val.path().to_path_buf();
-            compressed_size = compress_worker(val, &output_file)?;
-            compressed_list.push(file);
-        }
-        */
+            };
+        };
+    }
+    pb.inc(1);
+    /*
+            match tokio::io::copy(&mut Cursor::new(data.1), &mut optimized_file).await {
+                Ok(_done) => {
+                    println!("Copying Done!");
+                }
+                Err(err) => {
+                    eprintln!("Failed to copy repacked file: {}", err);
+                }
+            };
+    */
 
-        /*
+    /*
+            //TODO: MAke this async
+            match encoder.write_all(&data[..]) {
+                Ok(_done) => {
+                    println!("Writing to file...: ");
+                    encoder.try_finish()?;
+                }
+                Err(err) => {
+                    eprintln!("Error repacking files! : {}", err);
+                    return Err(CompressionError::IoError(err));
+                }
+            };
+    */
+
+    // Using it directly with no error handling works fine
+    //let cbz_entries = extract_dir_and_files_from_cbz(entry.path()).await?;
+
+    // Print cbz_entries on screen for testing
+    /*
+            for (file_name, file_path) in cbz_entries {
+                println!("{:?}: {}", file_name, file_path.to_str().unwrap());
+            }
+    */
+    //TODO: fetch entries and print
+    /*
+    * NOTE: This only compresses individual files not grabbing everything then compressing.
+    if val.file_type().is_file() && val.path().extension().map_or(false, |ext| ext == "rs") {
+        let file = val.path().to_path_buf();
+        compressed_size = compress_worker(val, &output_file)?;
+        compressed_list.push(file);
+    }
+    */
+
+    /*
                 progress += 1;
                 if let Some(ext) = entry.path().extension() {
                     if ext == "cbz" {
@@ -279,11 +356,12 @@ async fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
                     io::stdout().flush().unwrap();
                 }
 
-        */
 
         println!("before repacking: {}", HumanBytes(size as u64));
         println!("after repacking: {}", HumanBytes(data.1.len() as u64));
     }
+
+        */
     pb.finish_with_message("Compression done!");
     //encoder.try_finish()?;
     compressed_size = encoder.total_out();
@@ -293,7 +371,9 @@ async fn compress_action<P1: AsRef<Path>, P2: AsRef<Path>>(
 async fn main() {
     let args = Args::parse();
     let output_file = args.output_file.clone();
-    match compress_action(args.input_dir, args.output_file).await {
+    let input_dir = Arc::new(args.input_dir);
+    let time_taken = Instant::now();
+    match compress_action(input_dir, args.output_file).await {
         Ok(compressed) => {
             println!("Compression done for: ");
             for file in compressed.0 {
@@ -301,6 +381,10 @@ async fn main() {
             }
             println!("New compressed file name: {}", output_file);
             println!("New file size: {}", compressed.1);
+            println!(
+                "Total time taken for the function: {}",
+                format_duration(time_taken.elapsed()).to_string()
+            );
         }
         Err(CompressionError::IoError(err)) => {
             eprintln!("I/O Error: {}", err);
