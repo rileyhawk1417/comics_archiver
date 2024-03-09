@@ -373,6 +373,17 @@ async fn main() {
     let output_file = args.output_file.clone();
     let input_dir = Arc::new(args.input_dir);
     let time_taken = Instant::now();
+    /*
+     * TODO: Refactoring on how the code/logic behaves.
+     * NOTE: The below snippets are meant to be in `process_chapters`.
+     * Which will be one function handling all the data processing & file IO.
+     * As it goes over chapters.
+     * NOTE: Get name of img, img_data, metadata
+     * let extracted_data: Vec<String, Vec<u8>, Vec<Path>> = extract_files(AsRef<Path>).await
+     * let optimize_images: Vec<String, Vec<u8>, Vec<Path>> = optimize_imgs(extracted_data.await)
+     * let compressed_data: Vec<String, Vec<u8>> = repack_files(optimize_images)
+     * write_to_disk(compressed_data).await
+     * */
     match compress_action(input_dir, args.output_file).await {
         Ok(compressed) => {
             println!("Compression done for: ");
@@ -382,7 +393,7 @@ async fn main() {
             println!("New compressed file name: {}", output_file);
             println!("New file size: {}", compressed.1);
             println!(
-                "Total time taken for the function: {}",
+                "Total time taken for compression: {}",
                 format_duration(time_taken.elapsed()).to_string()
             );
         }

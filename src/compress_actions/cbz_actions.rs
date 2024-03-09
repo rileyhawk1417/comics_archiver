@@ -32,6 +32,7 @@ pub async fn extract_dir_and_files_from_cbz<P1: AsRef<Path>>(
     let mut zip_file = ZipArchive::new(file)?;
     let pb = ProgressBar::new(zip_file.len() as u64);
     println!("Unpacking cbz files...");
+    //TODO: Well need to print out the name of the archive am unpacking.
 
     for idx in 0..zip_file.len() {
         let mut inner_file = zip_file.by_index(idx)?;
