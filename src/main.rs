@@ -1,3 +1,4 @@
+use clap::builder::OsStr;
 use clap::{arg, Parser};
 use comics_archiver::cbz_actions::{
     compress_dir_and_files_to_cbz, compress_images_with_img, extract_dir_and_files_from_cbz,
@@ -90,7 +91,7 @@ fn cbz_file_count(file_dir: Arc<impl AsRef<Path> + Send + Sync>) -> u64 {
 fn cbz_file_list(
     source_dir: Arc<impl AsRef<Path> + Send + Sync>,
 ) -> Result<Vec<PathBuf>, CompressionError> {
-    let mut discovered_entries = Vec::new();
+    let mut discovered_entries: Vec<PathBuf> = Vec::new();
 
     for entry in WalkDir::new(source_dir.as_ref())
         .into_iter()
@@ -379,6 +380,7 @@ async fn main() {
     let time_taken = Instant::now();
     let cbz_files_list = cbz_file_list(input_dir).unwrap();
     for files in cbz_files_list {
+        //NOTE: Run `process_chapters in here for each chapter`
         println!("Filename: {}", files.file_name().unwrap().to_str().unwrap());
     }
 
