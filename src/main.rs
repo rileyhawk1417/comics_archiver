@@ -83,12 +83,16 @@ fn cbz_file_count(file_dir: Arc<impl AsRef<Path> + Send + Sync>) -> u64 {
     file_count as u64
 }
 
+/// Get the paths of the files from given path
+///
+/// * `source_dir`: <Arc> type value
+/// Return `Vec<PathBuf>` : file list, else Return fail.
 fn cbz_file_list(
-    file_list: Arc<impl AsRef<Path> + Send + Sync>,
+    source_dir: Arc<impl AsRef<Path> + Send + Sync>,
 ) -> Result<Vec<PathBuf>, CompressionError> {
     let mut discovered_entries = Vec::new();
 
-    for entry in WalkDir::new(file_list.as_ref())
+    for entry in WalkDir::new(source_dir.as_ref())
         .into_iter()
         .filter_map(|e| e.ok())
     {
@@ -373,6 +377,12 @@ async fn main() {
     let output_file = args.output_file.clone();
     let input_dir = Arc::new(args.input_dir);
     let time_taken = Instant::now();
+    let cbz_files_list = cbz_file_list(input_dir).unwrap();
+    for files in cbz_files_list {
+        println!("Filename: {}", files.file_name().unwrap().to_str().unwrap());
+    }
+
+    //TODO: Refactor the code to handle directories.
     /*
      * TODO: Refactoring on how the code/logic behaves.
      * NOTE: The below snippets are meant to be in `process_chapters`.
@@ -384,34 +394,36 @@ async fn main() {
      * let compressed_data: Vec<String, Vec<u8>> = repack_files(optimize_images)
      * write_to_disk(compressed_data).await
      * */
-    match compress_action(input_dir, args.output_file).await {
-        Ok(compressed) => {
-            println!("Compression done for: ");
-            for file in compressed.0 {
-                //println!("{}", file.1.to_str().unwrap());
+    /*
+        match compress_action(input_dir, args.output_file).await {
+            Ok(compressed) => {
+                println!("Compression done for: ");
+                for file in compressed.0 {
+                    //println!("{}", file.1.to_str().unwrap());
+                }
+                println!("New compressed file name: {}", output_file);
+                println!("New file size: {}", compressed.1);
+                println!(
+                    "Total time taken for compression: {}",
+                    format_duration(time_taken.elapsed()).to_string()
+                );
             }
-            println!("New compressed file name: {}", output_file);
-            println!("New file size: {}", compressed.1);
-            println!(
-                "Total time taken for compression: {}",
-                format_duration(time_taken.elapsed()).to_string()
-            );
-        }
-        Err(CompressionError::IoError(err)) => {
-            eprintln!("I/O Error: {}", err);
-            process::exit(1);
-        }
+            Err(CompressionError::IoError(err)) => {
+                eprintln!("I/O Error: {}", err);
+                process::exit(1);
+            }
 
-        Err(CompressionError::UnsupportedFileType) => {
-            eprintln!("Unsupported File Type only CBZ files are supported");
-            process::exit(1);
-        }
+            Err(CompressionError::UnsupportedFileType) => {
+                eprintln!("Unsupported File Type only CBZ files are supported");
+                process::exit(1);
+            }
 
-        Err(CompressionError::WalkDirError(err)) => {
-            eprintln!("Failed to find files in directory: {}", err);
-            process::exit(1);
+            Err(CompressionError::WalkDirError(err)) => {
+                eprintln!("Failed to find files in directory: {}", err);
+                process::exit(1);
+            }
         }
-    }
+    */
 }
 
 // This function works fine but hangs since it doesnt exit

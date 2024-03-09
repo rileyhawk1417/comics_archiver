@@ -25,7 +25,7 @@ impl fmt::Display for CompressionError {
         match self {
             CompressionError::IoError(err) => write!(f, "I/O Error: {}", err),
             CompressionError::UnsupportedFileType => write!(f, "Unsupported File Type!"),
-            CompressionError::WalkDirError(err) => write!(f, "Failed to find directory: {}", err),
+            CompressionError::WalkDirError(err) => write!(f, "Failed to walk in dir: {}", err),
         }
     }
 }
