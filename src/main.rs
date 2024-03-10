@@ -7,15 +7,18 @@ use comics_archiver::err_impl::CompressionError;
 use humantime::format_duration;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use liblzma::write::XzEncoder;
-use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::iter::{
+    IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Write};
+
 use std::path::{Path, PathBuf};
-use std::process;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::fs::File as AsyncFile;
 use tokio::io::{copy as Async_Copy, AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::sync::mpsc;
 use walkdir::{DirEntry, WalkDir};
 
 #[derive(Parser, Debug)]
@@ -372,6 +375,23 @@ async fn compress_action<'a, P2: AsRef<Path>>(
     compressed_size = encoder.total_out();
     Ok((compressed_list.clone(), compressed_size))
 }
+
+async fn process_chapters(file_path: String) {
+    let extracted_files = extract_dir_and_files_from_cbz(file_path).await;
+    for x in extracted_files.unwrap() {
+        println!("{}: {}", x.0.to_string(), x.2.to_str().unwrap());
+    }
+}
+
+async fn run_rayon_task_async<F, Fut, R>(task: F) -> R
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
+    task().await
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -379,10 +399,57 @@ async fn main() {
     let input_dir = Arc::new(args.input_dir);
     let time_taken = Instant::now();
     let cbz_files_list = cbz_file_list(input_dir).unwrap();
+    /*
     for files in cbz_files_list {
         //NOTE: Run `process_chapters in here for each chapter`
         println!("Filename: {}", files.file_name().unwrap().to_str().unwrap());
     }
+    */
+    let x = cbz_files_list
+        .par_iter()
+        .map(|chapter| {
+            /* NOTE: block_on works fine */
+            let chapter = chapter.to_str().unwrap().to_owned();
+            run_rayon_task_async(move || async move {
+                process_chapters(chapter).await;
+            })
+        })
+        .collect::<Vec<_>>();
+    for files in x {
+        files.await;
+    }
+
+    /*
+    async fn inner(cbz_files_list: Vec<PathBuf>) {
+        let (sender, mut receiver) = mpsc::channel(cbz_files_list.len());
+        let file_list_len = cbz_files_list.clone().len();
+        cbz_files_list
+            .into_par_iter()
+            .for_each_with(|chapter|{
+                let chapter = chapter.to_str().unwrap().to_owned();
+                tokio::task::spawn_blocking(move || {
+                    process_chapters(chapter);
+                })
+                .await
+                .unwrap();
+
+                /*
+                * NOTE: block_on works fine
+                        tokio::runtime::Runtime::new()
+                            .unwrap()
+                            .block_on(process_chapters(chapter));
+                */
+            });
+        for _ in 0..file_list_len {
+            receiver
+                .recv()
+                .await
+                .expect("Failed to receive complete signal");
+        }
+    }
+    let rayon_task = tokio::task::spawn(inner(cbz_files_list.clone()));
+    let _ = rayon_task.await.expect("Failed to execute");
+    */
 
     //TODO: Refactor the code to handle directories.
     /*
