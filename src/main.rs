@@ -384,21 +384,18 @@ async fn process_chapters(
     dir_path: &Arc<String>,
 ) -> Result<String, CompressionError> {
     let extracted_files: Vec<(String, Vec<u8>, PathBuf)> =
-        extract_dir_and_files_from_cbz(file_path)
-            .await
-            .expect("Failed to extract files");
+        extract_dir_and_files_from_cbz(file_path).await?;
     let optimized_images: Vec<(&String, Vec<u8>, &PathBuf)> = extracted_files
         .par_iter()
         .map(|(name, img_blob, img_path)| {
             //NOTE: Maybe change this to a match later..
-            let shrunk_img =
-                compress_images_with_img(img_blob.clone()).expect("Failed to compress image!");
+            let shrunk_img = compress_images_with_img(img_blob.clone()).unwrap();
             (name, shrunk_img, img_path)
         })
         .collect::<Vec<_>>();
 
     let repacked_archive: (String, Vec<u8>) =
-        compress_dir_and_files_to_cbz(optimized_images).expect("Failed to repack images");
+        compress_dir_and_files_to_cbz(optimized_images).unwrap();
 
     let tmp_output_path = format!("{}/{}", dir_path, "tmp");
     let tmp_output_file = format!(
@@ -475,6 +472,9 @@ async fn main() {
     }
 
     overall_progress.finish_with_message(finish_msg);
+
+    let time_taken = time_taken.elapsed();
+    println!("Time taken: {}", humantime::format_duration(time_taken));
     overall_progress.finish();
 
     /*
