@@ -136,7 +136,7 @@ pub async fn decompress_images_with_lzma(image_data: Vec<u8>) -> io::Result<Vec<
 /// file_contents = (file_data, file_path)
 /// Return `Vec<u8>>` zip archive.
 pub fn compress_dir_and_files_to_cbz(
-    file_contents: Vec<(String, Vec<u8>, PathBuf)>,
+    file_contents: Vec<(&String, Vec<u8>, &PathBuf)>,
 ) -> io::Result<(String, Vec<u8>)> {
     let mut zip_buffer = Vec::new();
     let mut archive_name: String = String::new();

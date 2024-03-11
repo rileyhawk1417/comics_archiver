@@ -15,6 +15,7 @@ use std::io::{self, BufReader, Cursor, Write};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::time::Instant;
 use tokio::fs::File as AsyncFile;
 use tokio::io::{copy as Async_Copy, AsyncReadExt, AsyncWriteExt, BufWriter};
@@ -250,7 +251,7 @@ async fn compress_action<'a, P2: AsRef<Path>>(
         }
     });
     pb_imgs.finish_with_message("Finished compressing images!");
-
+    /*
     //Loop inside all cbz archives.
     let final_compression: Vec<Result<(String, Vec<u8>), CompressionError>> = raw_data
         .par_iter()
@@ -263,6 +264,7 @@ async fn compress_action<'a, P2: AsRef<Path>>(
             },
         )
         .collect();
+    */
 
     let tmp_output_path = format!(
         "{}/{}",
@@ -270,20 +272,21 @@ async fn compress_action<'a, P2: AsRef<Path>>(
         "tmp"
     );
     tokio::fs::create_dir_all(tmp_output_path.clone()).await?;
+    /*
+        for items in final_compression {
+            let _ = if let Ok(item) = items {
+                let tmp_file_path = format!("{}/{}", tmp_output_path, item.0);
+                match tokio::fs::write(tmp_file_path, item.1).await {
+                    Ok(done) => done,
 
-    for items in final_compression {
-        let _ = if let Ok(item) = items {
-            let tmp_file_path = format!("{}/{}", tmp_output_path, item.0);
-            match tokio::fs::write(tmp_file_path, item.1).await {
-                Ok(done) => done,
-
-                Err(err) => {
-                    eprintln!("Error writing cbz file! : {}", err);
-                    return Err(CompressionError::IoError(err));
-                }
+                    Err(err) => {
+                        eprintln!("Error writing cbz file! : {}", err);
+                        return Err(CompressionError::IoError(err));
+                    }
+                };
             };
-        };
-    }
+        }
+    */
     pb.inc(1);
     /*
             match tokio::io::copy(&mut Cursor::new(data.1), &mut optimized_file).await {
@@ -376,11 +379,43 @@ async fn compress_action<'a, P2: AsRef<Path>>(
     Ok((compressed_list.clone(), compressed_size))
 }
 
-async fn process_chapters(file_path: String) {
-    let extracted_files = extract_dir_and_files_from_cbz(file_path).await;
-    for x in extracted_files.unwrap() {
-        println!("{}: {}", x.0.to_string(), x.2.to_str().unwrap());
+async fn process_chapters(
+    file_path: String,
+    dir_path: &Arc<String>,
+) -> Result<String, CompressionError> {
+    let extracted_files: Vec<(String, Vec<u8>, PathBuf)> =
+        extract_dir_and_files_from_cbz(file_path)
+            .await
+            .expect("Failed to extract files");
+    let optimized_images: Vec<(&String, Vec<u8>, &PathBuf)> = extracted_files
+        .par_iter()
+        .map(|(name, img_blob, img_path)| {
+            //NOTE: Maybe change this to a match later..
+            let shrunk_img =
+                compress_images_with_img(img_blob.clone()).expect("Failed to compress image!");
+            (name, shrunk_img, img_path)
+        })
+        .collect::<Vec<_>>();
+
+    let repacked_archive: (String, Vec<u8>) =
+        compress_dir_and_files_to_cbz(optimized_images).expect("Failed to repack images");
+
+    let tmp_output_path = format!("{}/{}", dir_path, "tmp");
+    let tmp_output_file = format!(
+        "{}/{}",
+        tmp_output_path,
+        repacked_archive.0.to_owned().to_string()
+    );
+    let _ = tokio::fs::create_dir_all(tmp_output_path.clone()).await;
+    match tokio::fs::write(tmp_output_file.clone(), repacked_archive.1).await {
+        Ok(done) => done,
+        Err(err) => {
+            eprintln!("Failed to write repacked archive to disk!: {}", err);
+            return Err(CompressionError::IoError(err));
+        }
     }
+    let compression_done = format!("Chapter {} compressed!", tmp_output_file.clone());
+    Ok(compression_done)
 }
 
 async fn run_rayon_task_async<F, Fut, R>(task: F) -> R
@@ -398,7 +433,20 @@ async fn main() {
     let output_file = args.output_file.clone();
     let input_dir = Arc::new(args.input_dir);
     let time_taken = Instant::now();
-    let cbz_files_list = cbz_file_list(input_dir).unwrap();
+    let in_clone = input_dir.clone();
+    let cbz_files_list = cbz_file_list(input_dir.clone()).unwrap();
+
+    let finish_msg = format!(
+        "Finished compression for: {}",
+        input_dir.clone().to_string()
+    );
+    let overall_progress = ProgressBar::new_spinner();
+    overall_progress.set_style(
+        ProgressStyle::with_template("Overall progress: {spinner}")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    overall_progress.enable_steady_tick(Duration::new(0, 100));
     /*
     for files in cbz_files_list {
         //NOTE: Run `process_chapters in here for each chapter`
@@ -410,14 +458,24 @@ async fn main() {
         .map(|chapter| {
             /* NOTE: block_on works fine */
             let chapter = chapter.to_str().unwrap().to_owned();
+            let in_dir = Arc::clone(&input_dir);
+
             run_rayon_task_async(move || async move {
-                process_chapters(chapter).await;
+                //NOTE: There is a bottle neck in memory, more like high memory consumption....
+                process_chapters(chapter, &in_dir)
+                    .await
+                    .expect("Failed to process chapters")
             })
         })
         .collect::<Vec<_>>();
     for files in x {
-        files.await;
+        overall_progress.inc(1);
+        let value = files.await.to_string();
+        println!("{}", value);
     }
+
+    overall_progress.finish_with_message(finish_msg);
+    overall_progress.finish();
 
     /*
     async fn inner(cbz_files_list: Vec<PathBuf>) {
