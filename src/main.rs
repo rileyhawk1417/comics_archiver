@@ -89,15 +89,33 @@ async fn process_chapters(
     file_path: String,
     dir_path: &Arc<String>,
 ) -> Result<String, CompressionError> {
+    let processed_imgs = Arc::new(Mutex::new(HashSet::new()));
     let extracted_files: Vec<(String, Vec<u8>, PathBuf)> = extract_from_cbz(file_path).await?;
+
+    let pb = ProgressBar::new_spinner();
     let optimized_images: Vec<(&String, Vec<u8>, &PathBuf)> = extracted_files
         .par_iter()
-        .map(|(name, img_blob, img_path)| {
+        .filter_map(|(name, img_blob, img_path)| {
+            let mut locked_processed_imgs = processed_imgs.lock().unwrap();
+            pb.set_style(
+                ProgressStyle::with_template("Compressing Images: {spinner} \n")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+            pb.enable_steady_tick(Duration::new(0, 100));
             //NOTE: Maybe change this to a match later..
-            let shrunk_img = img_compressor(img_blob.clone()).unwrap();
-            (name, shrunk_img, img_path)
+            if !locked_processed_imgs.contains(&(name, img_path)) {
+                let _ = &mut locked_processed_imgs.insert((name, img_path));
+                let shrunk_img = img_compressor(img_blob.clone()).unwrap();
+                pb.inc(1);
+                Some((name, shrunk_img, img_path))
+            } else {
+                //
+                None
+            }
         })
         .collect::<Vec<_>>();
+    pb.finish_and_clear();
 
     let repacked_archive: (String, Vec<u8>) = compress_to_cbz(optimized_images).unwrap();
 
@@ -159,13 +177,8 @@ async fn main() {
             let chapter = chapter.to_str().unwrap().to_owned();
             let in_dir = Arc::clone(&input_dir);
             let mut processed_set_locked = processed_set.lock().unwrap();
-            /*
-            *NOTE: In order to avoid duplication of tasks.
-            We need to filter them by chapter names that are already processed.
-            * */
             if !processed_set_locked.contains(&chapter) {
-                //NOTE: `processed_list` is captured variable in a `Fn` closure
-                let _ = &mut processed_set_locked.insert(chapter.clone());
+                let _ = &mut processed_set_locked.insert(chapter.to_string());
                 Some(run_rayon_task_async(move || async move {
                     //NOTE: There is a bottle neck in memory, more like high memory consumption....
                     process_chapters(chapter, &in_dir)
