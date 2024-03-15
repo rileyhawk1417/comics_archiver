@@ -14,3 +14,9 @@ I could have done it on `go`, `python`, `dart` or any other language really, but
 
 For now its still in `alpha` since am literally trying everything to get it working. ChatGPT is helping when it comes to putting out rough code snippets. Since I havent really done any rust projects I cant say the code in here has best practices. Although I am going to refactor it as I go along, who knows might end up building a GUI after this...
 
+### V2 Update
+
+- Well in v2 I am to correct some mistakes in `v1` and hopefully improve the efficiency of the code.
+- At some point might use [Tauri](https://tauri.app/) to build a GUI, though it would be a build it yourself case.
+
+
