@@ -57,20 +57,13 @@ pub async fn extract_from_cbz<P1: AsRef<Path>>(
 /// * `image_data` - Vec<u8> image data.
 /// Return `Vec<u8>` compressed image data
 pub fn img_compressor(image_data: Vec<u8>) -> Result<Vec<u8>, CompressionError> {
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::with_template("Image compression: {spinner}")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
     let mut compressed_data = Vec::new();
     let img = image::load_from_memory(&image_data).expect("Failed to load image!");
     img.write_to(
         &mut Cursor::new(&mut compressed_data),
         ImageOutputFormat::Jpeg(90),
     )
-    .expect("Failed to compress image!");
-    spinner.finish_and_clear();
+    .unwrap();
     Ok(compressed_data)
 }
 
